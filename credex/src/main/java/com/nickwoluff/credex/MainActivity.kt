@@ -23,6 +23,7 @@ import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -79,20 +80,24 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Help
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.Compress
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DataUsage
+import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.ForkRight
 import androidx.compose.material.icons.filled.FormatQuote
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.LooksOne
+import androidx.compose.material.icons.filled.LooksTwo
 import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsActive
@@ -103,12 +108,16 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Source
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Style
+import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.SwipeLeft
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -169,6 +178,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
@@ -186,11 +196,13 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Card as MiuixCard
 import top.yukonga.miuix.kmp.basic.Button as MiuixButton
@@ -207,6 +219,7 @@ import top.yukonga.miuix.kmp.basic.LinearProgressIndicator as MiuixLinearProgres
 import top.yukonga.miuix.kmp.basic.Surface as MiuixSurface
 import top.yukonga.miuix.kmp.basic.Slider as MiuixSlider
 import top.yukonga.miuix.kmp.basic.TextField as MiuixTextField
+import top.yukonga.miuix.kmp.basic.Text as MiuixText
 import top.yukonga.miuix.kmp.window.WindowDialog as MiuixWindowDialog
 import top.yukonga.miuix.kmp.window.WindowBottomSheet as MiuixWindowBottomSheet
 import top.yukonga.miuix.kmp.preference.ArrowPreference as MiuixArrowPreference
@@ -232,6 +245,24 @@ import java.net.URL
 private enum class AppTab { HOME, CONFIGURATION }
 
 private enum class AddBrand { CODEX, DEEPSEEK, GLM, KIMI, OPENCODE, SILICON_FLOW, VOLCENGINE, MIMO, STANDARD }
+
+private data class AddBrandEntry(
+    val brand: AddBrand,
+    val platform: PlatformBrand,
+    val subtitle: String,
+)
+
+private val ADD_BRAND_ENTRIES = listOf(
+    AddBrandEntry(AddBrand.DEEPSEEK, PlatformBrand.DEEPSEEK, "账户余额"),
+    AddBrandEntry(AddBrand.GLM, PlatformBrand.GLM, "账户余额 | Coding Plan"),
+    AddBrandEntry(AddBrand.KIMI, PlatformBrand.KIMI, "账户余额 | Coding Plan"),
+    AddBrandEntry(AddBrand.CODEX, PlatformBrand.OPENAI_CODEX, "5 小时配额 | 周配额"),
+    AddBrandEntry(AddBrand.OPENCODE, PlatformBrand.OPENCODE, "Zen 账户余额 | Go 配额"),
+    AddBrandEntry(AddBrand.SILICON_FLOW, PlatformBrand.SILICON_FLOW, "账户余额"),
+    AddBrandEntry(AddBrand.VOLCENGINE, PlatformBrand.VOLCENGINE, "账户余额 | Coding Plan | Agent Plan"),
+    AddBrandEntry(AddBrand.MIMO, PlatformBrand.XIAOMI_MIMO, "账户余额 | Token Plan"),
+    AddBrandEntry(AddBrand.STANDARD, PlatformBrand.CUSTOM_ENDPOINT, "账户余额"),
+)
 
 private enum class ActivityPage(val value: String) {
     ROOT("root"),
@@ -422,6 +453,7 @@ open class MainActivity : ComponentActivity() {
     private var materialAccent by mutableStateOf(MaterialAccent.BLUE)
     private var materialPaletteStyle by mutableStateOf(MaterialPaletteStyle.TONAL_SPOT)
     private var miuixBlur by mutableStateOf(true)
+    private var predictiveBackGesture by mutableStateOf(true)
     private var widgetPrimaryId by mutableStateOf(WidgetSelectionPreferences.CODEX_ID)
     private var widgetSecondaryId by mutableStateOf("")
     private var widgetCollapseTokenValues by mutableStateOf(false)
@@ -573,9 +605,18 @@ open class MainActivity : ComponentActivity() {
                 materialPaletteStyle = materialPaletteStyle,
             ) {
                 val hasOverlay = hasActiveOverlay()
-                BackHandler(enabled = hasOverlay, onBack = ::navigateBack)
+                val predictiveBackEnabled =
+                    predictiveBackGesture && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                PredictiveBackHandler(enabled = hasOverlay && predictiveBackEnabled) { progress ->
+                    progress.collect { }
+                    navigateBack()
+                }
                 BackHandler(
-                    enabled = activityPage != ActivityPage.ROOT && !hasOverlay,
+                    enabled = hasOverlay && !predictiveBackEnabled,
+                    onBack = ::navigateBack,
+                )
+                BackHandler(
+                    enabled = activityPage != ActivityPage.ROOT && !hasOverlay && !predictiveBackEnabled,
                     onBack = { finish() },
                 )
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -587,13 +628,6 @@ open class MainActivity : ComponentActivity() {
                 if (deletingBalanceServiceId != null) DeleteBalanceServiceDialog()
                 if (showAddServices) AddServicesDialog()
                 availableUpdate?.let { UpdateDialog(it) }
-            }
-        }
-        if (activityPage == ActivityPage.ROOT && backgroundEnabled) {
-            window.decorView.post {
-                if (QuotaRepository.signedIn(this) || StandardBalanceRepository.hasAuthenticatedService(this)) {
-                    prepareLiveSync()
-                }
             }
         }
         if (activityPage == ActivityPage.ROOT && autoUpdateCheck && !updateCheckStarted) {
@@ -697,6 +731,11 @@ open class MainActivity : ComponentActivity() {
                 ContextCompat.RECEIVER_NOT_EXPORTED,
             )
             receiverRegistered = true
+        }
+        if (activityPage == ActivityPage.ROOT && backgroundEnabled &&
+            (QuotaRepository.signedIn(this) || StandardBalanceRepository.hasAuthenticatedService(this))
+        ) {
+            prepareLiveSync()
         }
     }
 
@@ -979,19 +1018,19 @@ open class MainActivity : ComponentActivity() {
                         scrollBehavior = scrollBehavior,
                         navigationIcon = {
                             if (isSecondaryPage) {
-                                MiuixIconButton(onClick = { finish() }, holdDownState = true) {
+                                MiuixIconButton(onClick = { finish() }) {
                                     Icon(MiuixIcons.Regular.Back, contentDescription = "返回")
                                 }
                             } else if (selectedTab == AppTab.HOME) {
-                                MiuixIconButton(onClick = ::refresh, enabled = !refreshing, holdDownState = true) {
+                                MiuixIconButton(onClick = ::refresh, enabled = !refreshing) {
                                     RefreshIcon(miuix = true)
                                 }
                             }
                         },
                         actions = {
                             if (!isSecondaryPage) {
-                                MiuixIconButton(onClick = { showAddServices = true }, holdDownState = true) { Icon(MiuixIcons.Regular.Add, "添加服务") }
-                                MiuixIconButton(onClick = { openActivityPage(ActivityPage.SETTINGS) }, holdDownState = true) { Icon(MiuixIcons.Regular.Settings, "设置") }
+                                MiuixIconButton(onClick = { showAddServices = true }) { Icon(MiuixIcons.Regular.Add, "添加服务") }
+                                MiuixIconButton(onClick = { openActivityPage(ActivityPage.SETTINGS) }) { Icon(MiuixIcons.Regular.Settings, "设置") }
                             }
                         },
                     )
@@ -1380,11 +1419,13 @@ open class MainActivity : ComponentActivity() {
         singleAction: Boolean = false,
     ) {
         if (uiStyle == UiStyle.MIUIX) {
+            var dialogVisible by remember { mutableStateOf(true) }
             MiuixWindowDialog(
                 title = title,
                 summary = summary,
-                show = true,
-                onDismissRequest = onDismissRequest,
+                show = dialogVisible,
+                onDismissRequest = { dialogVisible = false },
+                onDismissFinished = onDismissRequest,
             ) {
                 // Miuix 的 WindowDialog 不会为任意嵌入式 Compose 内容提供 Material 的
                 // LocalContentColor。用透明 Surface 显式建立主题前景色，避免深色模式下
@@ -1910,7 +1951,12 @@ open class MainActivity : ComponentActivity() {
     @Composable
     private fun ConfigurationScreen(modifier: Modifier = Modifier) {
         val codexConnected = QuotaRepository.signedIn(this@MainActivity)
-        val brands = balanceServices.map { brandLabel(it.authMode) }.distinct()
+        val configuredPlatforms = balanceServices.mapTo(linkedSetOf()) { platformBrand(it.authMode) }
+        val platforms = ADD_BRAND_ENTRIES
+            .map(AddBrandEntry::platform)
+            .filter { platform ->
+                if (platform == PlatformBrand.OPENAI_CODEX) codexConnected else platform in configuredPlatforms
+            }
         Column(
             modifier
                 .fillMaxSize()
@@ -1919,34 +1965,28 @@ open class MainActivity : ComponentActivity() {
             verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
             SettingsSection("已添加服务") {
-                if (codexConnected) {
-                    SettingsActionRow(
-                        icon = if (showProviderIcons) ({ PlatformLogo(PlatformBrand.OPENAI_CODEX, 26.dp) }) else null,
-                        title = "OpenAI Codex",
-                        subtitle = "5 小时配额 | 周配额",
-                        onClick = { openActivityPage(ActivityPage.CONFIGURATION, "OpenAI Codex") },
-                        keepLeadingInMiuix = showProviderIcons,
-                    )
-                    if (brands.isNotEmpty()) SettingsDivider()
-                }
-                brands.forEachIndexed { index, brand ->
-                    val platform = PlatformBrand.entries.first { it.displayName == brand }
-                    val includedServices = balanceServices
-                        .asSequence()
-                        .filter { brandLabel(it.authMode) == brand }
-                        .map { serviceTypeLabel(it.authMode) }
-                        .distinct()
-                        .joinToString(" | ")
+                platforms.forEachIndexed { index, platform ->
+                    val brand = platform.displayName
+                    val subtitle = if (platform == PlatformBrand.OPENAI_CODEX) {
+                        "5 小时配额 | 周配额"
+                    } else {
+                        balanceServices
+                            .asSequence()
+                            .filter { platformBrand(it.authMode) == platform }
+                            .map { serviceTypeLabel(it.authMode) }
+                            .distinct()
+                            .joinToString(" | ")
+                    }
                     SettingsActionRow(
                         icon = if (showProviderIcons) ({ PlatformLogo(platform, 26.dp) }) else null,
                         title = brand,
-                        subtitle = includedServices,
+                        subtitle = subtitle,
                         onClick = { openActivityPage(ActivityPage.CONFIGURATION, brand) },
                         keepLeadingInMiuix = showProviderIcons,
                     )
-                    if (index + 1 < brands.size) SettingsDivider()
+                    if (index + 1 < platforms.size) SettingsDivider()
                 }
-                if (!codexConnected && brands.isEmpty()) {
+                if (platforms.isEmpty()) {
                     Text("还没有添加服务", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(16.dp))
                 }
             }
@@ -2048,15 +2088,9 @@ open class MainActivity : ComponentActivity() {
                         verticalArrangement = Arrangement.spacedBy(if (uiStyle == UiStyle.MATERIAL) 3.dp else 8.dp),
                     ) {
                         if (step == null) {
-                            AddBrandOption("DeepSeek", "账户余额", AddBrand.DEEPSEEK, 0, 9)
-                            AddBrandOption("GLM", "账户余额 | Coding Plan", AddBrand.GLM, 1, 9)
-                            AddBrandOption("Kimi", "账户余额 | Coding Plan", AddBrand.KIMI, 2, 9)
-                            AddBrandOption("OpenAI Codex", "5 小时配额 | 周配额", AddBrand.CODEX, 3, 9)
-                            AddBrandOption("OpenCode", "Zen 账户余额 | Go 配额", AddBrand.OPENCODE, 4, 9)
-                            AddBrandOption("SiliconFlow", "账户余额", AddBrand.SILICON_FLOW, 5, 9)
-                            AddBrandOption("火山引擎", "账户余额 | Coding Plan | Agent Plan", AddBrand.VOLCENGINE, 6, 9)
-                            AddBrandOption("Xiaomi MIMO", "账户余额 | Token Plan", AddBrand.MIMO, 7, 9)
-                            AddBrandOption("自定义接口", "账户余额", AddBrand.STANDARD, 8, 9)
+                            ADD_BRAND_ENTRIES.forEachIndexed { index, entry ->
+                                AddBrandOption(entry, index, ADD_BRAND_ENTRIES.size)
+                            }
                         } else when (step) {
                             AddBrand.CODEX -> AddServiceOption("Codex 用量与配额", "内置登录 | 5 小时配额 | 周配额", 0, 1) {
                                 showAddServices = false
@@ -2165,11 +2199,16 @@ open class MainActivity : ComponentActivity() {
                 }
             }
         } else {
+            var sheetVisible by remember { mutableStateOf(true) }
             MiuixWindowBottomSheet(
-                show = true,
+                show = sheetVisible,
                 title = title,
                 defaultWindowInsetsPadding = false,
-                onDismissRequest = { showAddServices = false; addBrand = null },
+                onDismissRequest = { sheetVisible = false },
+                onDismissFinished = {
+                    showAddServices = false
+                    addBrand = null
+                },
             ) {
                 KeepDialogNavigationImmersive()
                 Box(Modifier.fillMaxWidth().heightIn(max = 620.dp)) { AddServicesBody() }
@@ -2178,25 +2217,14 @@ open class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun AddBrandOption(title: String, subtitle: String, brand: AddBrand, index: Int, total: Int) {
-        val platform = when (brand) {
-            AddBrand.CODEX -> PlatformBrand.OPENAI_CODEX
-            AddBrand.DEEPSEEK -> PlatformBrand.DEEPSEEK
-            AddBrand.SILICON_FLOW -> PlatformBrand.SILICON_FLOW
-            AddBrand.VOLCENGINE -> PlatformBrand.VOLCENGINE
-            AddBrand.OPENCODE -> PlatformBrand.OPENCODE
-            AddBrand.KIMI -> PlatformBrand.KIMI
-            AddBrand.GLM -> PlatformBrand.GLM
-            AddBrand.MIMO -> PlatformBrand.XIAOMI_MIMO
-            AddBrand.STANDARD -> PlatformBrand.CUSTOM_ENDPOINT
-        }
+    private fun AddBrandOption(entry: AddBrandEntry, index: Int, total: Int) {
         AddServiceOption(
-            title = title,
-            subtitle = subtitle,
+            title = entry.platform.displayName,
+            subtitle = entry.subtitle,
             index = index,
             total = total,
-            leading = if (showProviderIcons) ({ PlatformLogo(platform, 28.dp) }) else null,
-            onClick = { addBrand = brand },
+            leading = if (showProviderIcons) ({ PlatformLogo(entry.platform, 28.dp) }) else null,
+            onClick = { addBrand = entry.brand },
         )
     }
 
@@ -2389,6 +2417,9 @@ open class MainActivity : ComponentActivity() {
             modifier.fillMaxSize().appVerticalScroll().padding(horizontal = 20.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            SettingsTextCard(
+                "背屏功能当前仅适配 小米17 Pro 系列，且需借助 Xposed 模块导入；若有需求，可前往项目地址 README 获取背屏资源与使用方法。",
+            )
             SettingsCard {
                 if (options.isEmpty()) {
                     SettingsActionRow(
@@ -2734,22 +2765,284 @@ open class MainActivity : ComponentActivity() {
 
     @Composable
     private fun UpdateDialog(update: AvailableUpdate) {
-        AlertDialog(
-            onDismissRequest = { availableUpdate = null },
-            title = { Text("发现新版本") },
-            text = { Text("当前版本 ${BuildConfig.VERSION_NAME}，可更新至 ${update.version}。") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        availableUpdate = null
-                        openExternalUrl(update.releaseUrl)
-                    },
-                ) { Text("查看更新") }
-            },
-            dismissButton = {
-                TextButton(onClick = { availableUpdate = null }) { Text("稍后") }
-            },
-        )
+        val dismiss = { availableUpdate = null }
+        val openRelease = {
+            dismiss()
+            openExternalUrl(update.releaseUrl)
+        }
+
+        if (uiStyle == UiStyle.MATERIAL) {
+            val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+            ModalBottomSheet(
+                onDismissRequest = dismiss,
+                sheetState = sheetState,
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                contentColor = MaterialTheme.colorScheme.onSurface,
+                tonalElevation = 0.dp,
+            ) {
+                MaterialUpdateSheetContent(
+                    update = update,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp),
+                    onDismiss = dismiss,
+                    onOpenRelease = openRelease,
+                )
+            }
+        } else {
+            var sheetVisible by remember { mutableStateOf(true) }
+            MiuixWindowBottomSheet(
+                show = sheetVisible,
+                backgroundColor = MiuixTheme.colorScheme.surface,
+                defaultWindowInsetsPadding = false,
+                onDismissRequest = { sheetVisible = false },
+                onDismissFinished = dismiss,
+            ) {
+                KeepDialogNavigationImmersive()
+                MiuixUpdateSheetContent(
+                    update = update,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 0.dp)
+                        .navigationBarsPadding(),
+                    onDismiss = dismiss,
+                    onOpenRelease = openRelease,
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun MaterialUpdateSheetContent(
+        update: AvailableUpdate,
+        modifier: Modifier = Modifier,
+        onDismiss: () -> Unit,
+        onOpenRelease: () -> Unit,
+    ) {
+        val releaseNotes = update.releaseNotes.ifBlank { "暂无更新说明" }
+        val notesMaxHeight = updateNotesMaxHeight()
+
+        Column(
+            modifier = modifier.padding(bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Update,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(40.dp),
+                )
+                Spacer(Modifier.width(16.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = "发现新版本 ${update.version}",
+                        style = MaterialTheme.typography.titleLarge.copy(
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                        ),
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "当前版本：${BuildConfig.VERSION_NAME}",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                ) {
+                    Text(
+                        text = "正式版",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                    )
+                }
+            }
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 96.dp, max = notesMaxHeight),
+                shape = MaterialTheme.shapes.large,
+                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                contentColor = MaterialTheme.colorScheme.onSurface,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 20.dp, vertical = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        text = "更新内容",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontSize = MaterialTheme.typography.bodyLarge.fontSize,
+                        ),
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = releaseNotes,
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            fontSize = MaterialTheme.typography.titleMedium.fontSize,
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppNeutralButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.widthIn(min = 88.dp),
+                ) {
+                    Text(
+                        text = "忽略",
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+                AppButton(
+                    onClick = onOpenRelease,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(
+                        text = "更新",
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun MiuixUpdateSheetContent(
+        update: AvailableUpdate,
+        modifier: Modifier = Modifier,
+        onDismiss: () -> Unit,
+        onOpenRelease: () -> Unit,
+    ) {
+        val releaseNotes = update.releaseNotes.ifBlank { "暂无更新说明" }
+        val notesMaxHeight = updateNotesMaxHeight()
+        val colors = MiuixTheme.colorScheme
+
+        Column(
+            modifier = modifier.padding(bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Update,
+                    contentDescription = null,
+                    tint = colors.primary,
+                    modifier = Modifier.size(40.dp),
+                )
+                Spacer(Modifier.width(16.dp))
+                Column(Modifier.weight(1f)) {
+                    MiuixText(
+                        text = "发现新版本 ${update.version}",
+                        style = MiuixTheme.textStyles.title3.copy(
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                        ),
+                        color = colors.onSurface,
+                    )
+                    MiuixText(
+                        text = "当前版本：${BuildConfig.VERSION_NAME}",
+                        style = MiuixTheme.textStyles.body2,
+                        color = colors.onSurfaceVariantSummary,
+                    )
+                }
+                MiuixSurface(
+                    shape = RoundedCornerShape(50),
+                    color = colors.primaryContainer,
+                ) {
+                    MiuixText(
+                        text = "正式版",
+                        style = MiuixTheme.textStyles.body2,
+                        color = colors.onPrimaryContainer,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                    )
+                }
+            }
+
+            MiuixCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 96.dp, max = notesMaxHeight),
+                colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(
+                    color = colors.surfaceContainer,
+                    contentColor = colors.onSurfaceContainer,
+                ),
+                insideMargin = PaddingValues(0.dp),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 20.dp, vertical = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    MiuixText(
+                        text = "更新内容",
+                        style = MiuixTheme.textStyles.subtitle.copy(
+                            fontSize = MiuixTheme.textStyles.paragraph.fontSize,
+                        ),
+                        color = colors.onSurfaceContainer,
+                    )
+                    MiuixText(
+                        text = releaseNotes,
+                        style = MiuixTheme.textStyles.paragraph.copy(
+                            fontSize = MiuixTheme.textStyles.subtitle.fontSize,
+                        ),
+                        color = colors.onSurfaceContainerVariant,
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                MiuixButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.widthIn(min = 88.dp),
+                    colors = MiuixButtonDefaults.buttonColors(),
+                ) {
+                    MiuixText(
+                        text = "忽略",
+                        style = MiuixTheme.textStyles.button,
+                    )
+                }
+                MiuixButton(
+                    onClick = onOpenRelease,
+                    modifier = Modifier.weight(1f),
+                    colors = MiuixButtonDefaults.buttonColorsPrimary(),
+                ) {
+                    MiuixText(
+                        text = "更新",
+                        style = MiuixTheme.textStyles.button,
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun updateNotesMaxHeight(): androidx.compose.ui.unit.Dp {
+        val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+        return (screenHeight * 0.45f).coerceAtLeast(180.dp)
     }
 
     @Composable
@@ -2762,8 +3055,8 @@ open class MainActivity : ComponentActivity() {
                 SettingsActionRow(
                     icon = { Icon(Icons.Filled.Source, null) },
                     title = "Orynnx 原版仓库",
-                    subtitle = "github.com/Orynnx/CodeX-Rate-on-Rear-Screen",
-                    onClick = { openExternalUrl("https://github.com/Orynnx/CodeX-Rate-on-Rear-Screen") },
+                    subtitle = "github.com/Orynnx/Credex",
+                    onClick = { openExternalUrl("https://github.com/Orynnx/Credex") },
                 )
                 SettingsDivider()
                 SettingsActionRow(
@@ -2953,6 +3246,21 @@ open class MainActivity : ComponentActivity() {
                         },
                     )
                 }
+                SettingsDivider()
+                SettingsSwitchRow(
+                    title = "预测性返回手势",
+                    subtitle = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        "启用系统返回预览动画"
+                    } else {
+                        "需要 Android 13 或更高版本"
+                    },
+                    checked = predictiveBackGesture,
+                    leadingIcon = Icons.Filled.SwipeLeft,
+                    onCheckedChange = { enabled ->
+                        predictiveBackGesture = enabled
+                        DashboardPreferences.setPredictiveBackGesture(this@MainActivity, enabled)
+                    },
+                )
             }
         }
     }
@@ -3013,7 +3321,7 @@ open class MainActivity : ComponentActivity() {
                 },
         ) {
             SettingsActionRow(
-                icon = { Icon(Icons.Filled.Tune, contentDescription = null) },
+                icon = { Icon(dropdownPreferenceIcon(title), contentDescription = null) },
                 title = title,
                 subtitle = subtitle,
                 onClick = null,
@@ -3191,7 +3499,7 @@ open class MainActivity : ComponentActivity() {
                     if (balanceAuthMode == BalanceAuthMode.SILICONFLOW_CONSOLE) {
                         EditorSwitchRow(
                             title = "把代金券计入余额",
-                            subtitle = if (balanceIncludeVouchers) "会把可用代金券剩余额度一并累加" else "只显示控制台现金余额",
+                            subtitle = if (balanceIncludeVouchers) "会把可用代金券剩余额度一并累加" else "只显示控制台余额",
                             checked = balanceIncludeVouchers,
                             onCheckedChange = { balanceIncludeVouchers = it; balanceEditorError = "" },
                         )
@@ -3532,11 +3840,24 @@ open class MainActivity : ComponentActivity() {
         title.contains("常驻通知") -> Icons.Filled.NotificationsActive
         title.contains("电池") || title.contains("后台") -> Icons.Filled.BatteryChargingFull
         title.contains("折叠") -> Icons.Filled.Compress
-        title.contains("动态取色") -> Icons.Filled.ColorLens
+        title.contains("动态取色") -> Icons.Filled.Style
         title.contains("模糊") -> Icons.Filled.BlurOn
         title.contains("展示剩余") -> Icons.Filled.DataUsage
         title.contains("Codex 配额") -> Icons.Filled.Speed
         title.contains("启用此服务") -> Icons.Filled.Visibility
+        else -> Icons.Filled.Tune
+    }
+
+    private fun dropdownPreferenceIcon(title: String): ImageVector = when (title) {
+        "界面风格" -> Icons.Filled.Dashboard
+        "主题" -> Icons.Filled.DarkMode
+        "强调色" -> Icons.Filled.Palette
+        "调色板风格" -> Icons.Filled.AutoAwesome
+        "主服务" -> Icons.Filled.LooksOne
+        "副服务" -> Icons.Filled.LooksTwo
+        "换算方式" -> Icons.Filled.DataUsage
+        "助手" -> Icons.Filled.SmartToy
+        "壁纸" -> Icons.Filled.Wallpaper
         else -> Icons.Filled.Tune
     }
 
@@ -3669,6 +3990,7 @@ open class MainActivity : ComponentActivity() {
         val hasAnyAuthenticatedService = QuotaRepository.signedIn(this) || StandardBalanceRepository.hasAuthenticatedService(this)
         if (!hasAnyAuthenticatedService || !backgroundEnabled) return
         QuotaRefreshScheduler.schedule(this)
+        QuotaRefreshScheduler.requestImmediate(this, force = false)
         if (!notificationSyncEnabled) {
             QuotaForegroundService.stop(this)
             serviceRunning = false
@@ -3838,10 +4160,12 @@ open class MainActivity : ComponentActivity() {
         materialAccent = DashboardPreferences.materialAccent(this)
         materialPaletteStyle = DashboardPreferences.materialPaletteStyle(this)
         miuixBlur = DashboardPreferences.miuixBlur(this)
+        predictiveBackGesture = DashboardPreferences.predictiveBackGesture(this)
     }
 
     private fun navigateBack() {
         when {
+            availableUpdate != null -> availableUpdate = null
             showStylePicker -> showStylePicker = false
             showAddServices -> { showAddServices = false; addBrand = null }
             showBalanceEditor && !balanceEditorBusy -> closeBalanceEditor()
@@ -3853,7 +4177,7 @@ open class MainActivity : ComponentActivity() {
     }
 
     private fun hasActiveOverlay(): Boolean =
-        showStylePicker || showAddServices || showBalanceEditor ||
+        availableUpdate != null || showStylePicker || showAddServices || showBalanceEditor ||
             deletingBalanceServiceId != null ||
             showSignOutConfirm || showNotificationEducation
 
@@ -4076,9 +4400,7 @@ open class MainActivity : ComponentActivity() {
         message = "正在更新…"
         Thread {
             val result = runCatching {
-                if (hasCodex) QuotaRepository.refresh(this, force = true)
-                StandardBalanceRepository.refreshAll(this, force = true)
-                QuotaRepository.current(this)
+                QuotaRefreshCoordinator.refreshAll(this, force = true).state
             }
             runOnUiThread {
                 refreshing = false

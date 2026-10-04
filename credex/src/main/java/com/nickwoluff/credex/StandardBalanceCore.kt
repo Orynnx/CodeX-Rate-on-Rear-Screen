@@ -9,6 +9,7 @@ import androidx.core.content.edit
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
+import java.net.HttpCookie
 import java.net.URL
 import java.net.URLEncoder
 import java.security.KeyStore
@@ -16,6 +17,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.UUID
+import java.util.concurrent.Executors
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -156,6 +158,7 @@ object DashboardPreferences {
     private const val MATERIAL_ACCENT = "material_accent"
     private const val MATERIAL_PALETTE_STYLE = "material_palette_style"
     private const val MIUIX_BLUR = "miuix_blur"
+    private const val PREDICTIVE_BACK_GESTURE = "predictive_back_gesture"
 
     fun showCodex(context: Context) = prefs(context).getBoolean(SHOW_CODEX, true)
     fun setShowCodex(context: Context, value: Boolean) = prefs(context).edit { putBoolean(SHOW_CODEX, value) }
@@ -180,6 +183,9 @@ object DashboardPreferences {
         prefs(context).edit { putString(MATERIAL_PALETTE_STYLE, value.name) }
     fun miuixBlur(context: Context) = prefs(context).getBoolean(MIUIX_BLUR, true)
     fun setMiuixBlur(context: Context, value: Boolean) = prefs(context).edit { putBoolean(MIUIX_BLUR, value) }
+    fun predictiveBackGesture(context: Context) = prefs(context).getBoolean(PREDICTIVE_BACK_GESTURE, true)
+    fun setPredictiveBackGesture(context: Context, value: Boolean) =
+        prefs(context).edit { putBoolean(PREDICTIVE_BACK_GESTURE, value) }
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     private inline fun <reified T : Enum<T>> enumPreference(context: Context, key: String, fallback: T): T =
@@ -415,7 +421,29 @@ private object BalanceSecretBox {
     }
 }
 
-private class BalanceHttpException(val statusCode: Int, message: String) : Exception(message)
+private class BalanceHttpException(
+    val statusCode: Int,
+    message: String,
+    val payload: JSONObject? = null,
+) : Exception(message)
+
+private class MimoSessionExpiredException(
+    message: String,
+    val loginUrl: String?,
+) : Exception(message)
+
+internal fun mimoSessionLoginUrl(payload: JSONObject?): String? = payload
+    ?.optString("loginUrl")
+    ?.trim()
+    ?.takeIf(String::isNotBlank)
+
+internal fun isMimoSessionExpiredPayload(payload: JSONObject): Boolean {
+    val code = payload.optInt("code", 0)
+    if (code in setOf(401, 403) || mimoSessionLoginUrl(payload) != null) return true
+    val message = payload.optString("message").trim()
+    return listOf("未登录", "登录已过期", "会话已过期", "认证失败", "unauthorized", "forbidden", "session expired")
+        .any { marker -> message.contains(marker, ignoreCase = true) }
+}
 
 /**
  * Adapter for the standard balance contract plus SiliconFlow's API-key contract:
@@ -428,7 +456,9 @@ object StandardBalanceRepository {
     private const val MIN_REFRESH_MILLIS = 60_000L
     private const val KIMI_OAUTH_HOST = "https://auth.kimi.com"
     private const val KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
+    private const val MAX_PARALLEL_REFRESHES = 8
     private val lock = Any()
+    private val refreshExecutor = Executors.newFixedThreadPool(MAX_PARALLEL_REFRESHES)
     private val clockFormatter = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault())
 
     fun list(context: Context): List<BalanceService> = stored(context, decryptSecrets = false)
@@ -910,7 +940,7 @@ object StandardBalanceRepository {
                 siliconFlowConsoleHeaders(cleanSubjectId, cleanSessionToken),
             ),
         )
-        val cashBalance = readSiliconFlowConsoleBalance(data)
+        val balanceAmount = readSiliconFlowConsoleBalance(data)
             ?: error("SiliconFlow 控制台响应中没有 financialInfo.available")
         val voucherBalance = if (withCredentials.includeVouchers) {
             readSiliconFlowVoucherBalance(
@@ -928,8 +958,13 @@ object StandardBalanceRepository {
             java.math.BigDecimal.ZERO
         }
         val next = withCredentials.copy(
-            balance = formatBalance(cashBalance.add(voucherBalance)),
+            balance = formatBalance(balanceAmount.add(voucherBalance)),
             currency = "¥",
+            detail = siliconFlowConsoleBalanceDetail(
+                balanceAmount = balanceAmount,
+                voucherBalance = voucherBalance,
+                includeVouchers = withCredentials.includeVouchers,
+            ),
             updatedAt = clock(),
             lastAttemptAtMillis = System.currentTimeMillis(),
             status = consoleStatus(withCredentials.includeVouchers),
@@ -957,7 +992,7 @@ object StandardBalanceRepository {
             displayKind = if (service.authMode == BalanceAuthMode.MIMO_TOKEN_PLAN) BalanceDisplayKind.TOKEN_PLAN else BalanceDisplayKind.AMOUNT,
         )
         replace(context, withCredentials)
-        val next = fetchMimo(withCredentials)
+        val next = fetchMimo(context, withCredentials)
         replace(context, next)
         QuotaRefreshScheduler.schedule(context)
         notifyChanged(context)
@@ -970,13 +1005,13 @@ object StandardBalanceRepository {
         replace(context, initial.copy(lastAttemptAtMillis = now))
         return try {
             val current = requireStored(context, initial.id)
-            val success = fetchMimo(current)
+            val success = fetchMimo(context, current)
             replace(context, success)
             notifyChanged(context)
             success.public()
         } catch (error: Exception) {
             val latest = requireStored(context, initial.id)
-            val authRequired = error is BalanceHttpException && error.statusCode in setOf(401, 403)
+            val authRequired = isMimoSessionAuthFailure(error)
             val failed = latest.copy(
                 status = if (authRequired) "Xiaomi MIMO 会话已过期" else "暂时无法更新",
                 health = if (authRequired) BalanceHealth.AUTH_REQUIRED else if (latest.balance != "--") BalanceHealth.CACHED else BalanceHealth.ERROR,
@@ -987,49 +1022,84 @@ object StandardBalanceRepository {
         }
     }
 
-    private fun fetchMimo(service: StoredBalanceService): StoredBalanceService {
-        val headers = mimoHeaders(service.sessionToken)
-        return if (service.authMode == BalanceAuthMode.MIMO_BALANCE) {
-            val data = unwrap(requestJson(mimoBalanceUrl(service.endpoint), "GET", null, null, headers))
-            val snapshot = readMimoPayAsYouGo(data)
-            service.copy(
-                balance = formatBalance(snapshot.cash),
-                currency = "CNY",
-                detail = buildString {
-                    append("现金 ¥").append(formatBalance(snapshot.cash))
-                    snapshot.gift?.let { append(" · 赠送 ¥").append(formatBalance(it)) }
+    private fun fetchMimo(
+        context: Context,
+        service: StoredBalanceService,
+        allowSessionRefresh: Boolean = true,
+    ): StoredBalanceService {
+        var current = service
+        return try {
+            fun request(url: String): JSONObject = requestJson(
+                url,
+                "GET",
+                null,
+                null,
+                mimoHeaders(current.sessionToken),
+                onSetCookies = { setCookies ->
+                    val merged = mergeMimoCookieHeader(current.sessionToken, setCookies)
+                    if (merged != current.sessionToken) {
+                        current = current.copy(sessionToken = merged)
+                        replace(context, current)
+                    }
                 },
-                displayKind = BalanceDisplayKind.AMOUNT,
-                used = "",
-                total = "",
-                resetAt = "",
-                updatedAt = clock(),
-                lastAttemptAtMillis = System.currentTimeMillis(),
-                status = "Xiaomi MIMO 已连接",
-                health = BalanceHealth.FRESH,
             )
-        } else {
-            val detail = unwrap(requestJson(mimoTokenPlanDetailUrl(service.endpoint), "GET", null, null, headers))
-            val usage = unwrap(requestJson(mimoTokenPlanUsageUrl(service.endpoint), "GET", null, null, headers))
-            val snapshot = readMimoTokenPlan(detail, usage)
-            service.copy(
-                balance = formatBalance(snapshot.remaining),
-                currency = "TOKEN",
-                detail = buildString {
-                    append(snapshot.plan)
-                    append(" · 剩余 ").append(formatTokenCount(snapshot.remaining))
-                    append(" / ").append(formatTokenCount(snapshot.limit)).append(" Credits")
-                    snapshot.expiresAt.takeIf { it.isNotBlank() }?.let { append(" · 有效期至 ").append(it) }
-                },
-                displayKind = BalanceDisplayKind.TOKEN_PLAN,
-                used = formatBalance(snapshot.used),
-                total = formatBalance(snapshot.limit),
-                resetAt = snapshot.expiresAt,
-                updatedAt = clock(),
-                lastAttemptAtMillis = System.currentTimeMillis(),
-                status = "Xiaomi MIMO Token Plan",
-                health = BalanceHealth.FRESH,
-            )
+            if (service.authMode == BalanceAuthMode.MIMO_BALANCE) {
+                val data = unwrapMimo(request(mimoBalanceUrl(service.endpoint)))
+                val snapshot = readMimoPayAsYouGo(data)
+                current.copy(
+                    balance = formatBalance(snapshot.cash),
+                    currency = "CNY",
+                    detail = buildString {
+                        append("现金 ¥").append(formatBalance(snapshot.cash))
+                        snapshot.gift?.let { append(" · 赠送 ¥").append(formatBalance(it)) }
+                    },
+                    displayKind = BalanceDisplayKind.AMOUNT,
+                    used = "",
+                    total = "",
+                    resetAt = "",
+                    updatedAt = clock(),
+                    lastAttemptAtMillis = System.currentTimeMillis(),
+                    status = "Xiaomi MIMO 已连接",
+                    health = BalanceHealth.FRESH,
+                )
+            } else {
+                val detail = unwrapMimo(request(mimoTokenPlanDetailUrl(service.endpoint)))
+                val usage = unwrapMimo(request(mimoTokenPlanUsageUrl(service.endpoint)))
+                val snapshot = readMimoTokenPlan(detail, usage)
+                current.copy(
+                    balance = formatBalance(snapshot.remaining),
+                    currency = "TOKEN",
+                    detail = buildString {
+                        append(snapshot.plan)
+                        append(" · 剩余 ").append(formatTokenCount(snapshot.remaining))
+                        append(" /").append(formatTokenCount(snapshot.limit)).append(" Credits")
+                        snapshot.expiresAt.takeIf { it.isNotBlank() }?.let { append(" · 有效期至 ").append(it) }
+                    },
+                    displayKind = BalanceDisplayKind.TOKEN_PLAN,
+                    used = formatBalance(snapshot.used),
+                    total = formatBalance(snapshot.limit),
+                    resetAt = snapshot.expiresAt,
+                    updatedAt = clock(),
+                    lastAttemptAtMillis = System.currentTimeMillis(),
+                    status = "Xiaomi MIMO Token Plan",
+                    health = BalanceHealth.FRESH,
+                )
+            }
+        } catch (error: Exception) {
+            if (!allowSessionRefresh || !isMimoSessionAuthFailure(error)) {
+                throw error
+            }
+            val loginUrl = when (error) {
+                is MimoSessionExpiredException -> error.loginUrl
+                is BalanceHttpException -> mimoSessionLoginUrl(error.payload)
+                else -> null
+            }
+            val refreshedCookie = MimoSessionRefresher.refresh(context, current.sessionToken, loginUrl)
+                ?.takeIf { it.isNotBlank() }
+                ?: throw error
+            val refreshed = current.copy(sessionToken = refreshedCookie)
+            replace(context, refreshed)
+            fetchMimo(context, refreshed, allowSessionRefresh = false)
         }
     }
 
@@ -1522,7 +1592,18 @@ object StandardBalanceRepository {
         java.math.BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()
 
     fun refreshAll(context: Context, force: Boolean = false) {
-        list(context).forEach { runCatching { refresh(context, it.id, force) } }
+        val tasks = list(context).map { service ->
+            refreshExecutor.submit {
+                runCatching { refresh(context, service.id, force) }
+            }
+        }
+        try {
+            tasks.forEach { it.get() }
+        } catch (error: InterruptedException) {
+            tasks.forEach { it.cancel(true) }
+            Thread.currentThread().interrupt()
+            throw error
+        }
     }
 
     private fun refreshApiKey(context: Context, initial: StoredBalanceService, force: Boolean): BalanceService {
@@ -1609,7 +1690,7 @@ object StandardBalanceRepository {
                     siliconFlowConsoleHeaders(current.subjectId, current.sessionToken),
                 ),
             )
-            val cashBalance = readSiliconFlowConsoleBalance(data)
+            val balanceAmount = readSiliconFlowConsoleBalance(data)
                 ?: error("SiliconFlow 控制台响应中没有 financialInfo.available")
             val voucherBalance = if (current.includeVouchers) {
                 readSiliconFlowVoucherBalance(
@@ -1627,8 +1708,13 @@ object StandardBalanceRepository {
                 java.math.BigDecimal.ZERO
             }
             val success = current.copy(
-                balance = formatBalance(cashBalance.add(voucherBalance)),
+                balance = formatBalance(balanceAmount.add(voucherBalance)),
                 currency = "¥",
+                detail = siliconFlowConsoleBalanceDetail(
+                    balanceAmount = balanceAmount,
+                    voucherBalance = voucherBalance,
+                    includeVouchers = current.includeVouchers,
+                ),
                 updatedAt = clock(),
                 status = consoleStatus(current.includeVouchers),
                 health = BalanceHealth.FRESH,
@@ -1684,6 +1770,7 @@ object StandardBalanceRepository {
         body: JSONObject?,
         token: String?,
         headers: Map<String, String> = emptyMap(),
+        onSetCookies: ((List<String>) -> Unit)? = null,
     ): JSONObject {
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.requestMethod = method
@@ -1699,11 +1786,17 @@ object StandardBalanceRepository {
             connection.outputStream.use { it.write(body.toString().toByteArray()) }
         }
         val code = connection.responseCode
+        onSetCookies?.invoke(
+            connection.headerFields.entries
+                .filter { (name, _) -> name.equals("Set-Cookie", ignoreCase = true) }
+                .flatMap { it.value.orEmpty() },
+        )
         val stream = if (code in 200..299) connection.inputStream else connection.errorStream
         val raw = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
         if (code !in 200..299) {
-            val message = runCatching { JSONObject(raw).optString("message") }.getOrNull().orEmpty()
-            throw BalanceHttpException(code, message.ifBlank { "HTTP $code" })
+            val payload = runCatching { JSONObject(raw) }.getOrNull()
+            val message = payload?.optString("message").orEmpty()
+            throw BalanceHttpException(code, message.ifBlank { "HTTP $code" }, payload)
         }
         return JSONObject(raw)
     }
@@ -1758,6 +1851,22 @@ object StandardBalanceRepository {
         return payload.optJSONObject("data") ?: payload
     }
 
+    private fun unwrapMimo(payload: JSONObject): JSONObject {
+        val code = payload.optInt("code", 0)
+        if (code != 0) {
+            val message = payload.optString("message", "Xiaomi MIMO 请求失败")
+            if (isMimoSessionExpiredPayload(payload)) {
+                throw MimoSessionExpiredException(message, mimoSessionLoginUrl(payload))
+            }
+            error(message)
+        }
+        return payload.optJSONObject("data") ?: payload
+    }
+
+    private fun isMimoSessionAuthFailure(error: Exception): Boolean =
+        error is MimoSessionExpiredException ||
+            (error is BalanceHttpException && error.statusCode in setOf(401, 403))
+
     private fun siliconFlowData(payload: JSONObject): JSONObject {
         val code = payload.optInt("code", 20000)
         check(code == 20000 || code == 0) { payload.optString("message", "SiliconFlow 请求失败") }
@@ -1791,15 +1900,15 @@ object StandardBalanceRepository {
             val paid = toppedUp ?: total.subtract(granted ?: java.math.BigDecimal.ZERO).max(java.math.BigDecimal.ZERO)
             val displayedTotal = if (includeGrantedBalance) total else paid
             val parts = buildList {
-                if (includeGrantedBalance) granted?.let { add("赠送 ${currency} ${formatBalance(it)}") }
-                toppedUp?.let { add("充值 ${currency} ${formatBalance(it)}") }
+                add("充值 ${formatMoney(currency, paid)}")
+                if (includeGrantedBalance) granted?.let { add("赠送 ${formatMoney(currency, it)}") }
             }
             DeepSeekBalanceSnapshot(displayedTotal, currency, parts.joinToString(" · "), true)
         }
         check(snapshots.isNotEmpty()) { "DeepSeek 响应中没有有效余额" }
         val preferred = snapshots.firstOrNull { it.currency.equals("CNY", ignoreCase = true) } ?: snapshots.first()
         val detail = if (snapshots.size == 1) preferred.detail else {
-            snapshots.joinToString(" · ") { "${it.currency} ${formatBalance(it.total)}" }
+            snapshots.joinToString(" · ") { formatMoney(it.currency, it.total) }
         }
         return preferred.copy(
             detail = detail,
@@ -1869,6 +1978,15 @@ object StandardBalanceRepository {
 
     private fun formatBalance(value: java.math.BigDecimal): String =
         value.stripTrailingZeros().toPlainString()
+
+    private fun formatMoney(currency: String, value: java.math.BigDecimal): String {
+        val amount = formatBalance(value)
+        return if (currency.equals("CNY", ignoreCase = true) || currency == "¥") {
+            "¥$amount"
+        } else {
+            "$currency $amount"
+        }
+    }
 
     private fun normalizeEndpoint(raw: String): String {
         val endpoint = raw.trim().trimEnd('/')
@@ -1974,7 +2092,7 @@ object StandardBalanceRepository {
         }
     }
 
-    private fun replace(context: Context, value: StoredBalanceService) {
+    private fun replace(context: Context, value: StoredBalanceService) = synchronized(lock) {
         saveStored(context, stored(context).map { if (it.id == value.id) value else it })
     }
 
@@ -1988,9 +2106,48 @@ object StandardBalanceRepository {
     private fun String.toUriCompat() = android.net.Uri.parse(this)
 }
 
+private val MIMO_SESSION_COOKIE_NAMES = setOf(
+    "api-platform_ph",
+    "api-platform_serviceToken",
+    "api-platform_slh",
+    "userId",
+)
+
+/** 仅合并小米 MIMO 控制台回传的会话 Cookie。 */
+internal fun mergeMimoCookieHeader(existing: String, setCookieHeaders: List<String>): String {
+    val cookies = linkedMapOf<String, String>()
+    existing.trim()
+        .removePrefix("Cookie:")
+        .trim()
+        .split(';')
+        .map(String::trim)
+        .forEach { item ->
+            val separator = item.indexOf('=')
+            if (separator > 0) {
+                val name = item.substring(0, separator).trim()
+                if (name in MIMO_SESSION_COOKIE_NAMES) cookies[name] = item.substring(separator + 1).trim()
+            }
+        }
+    setCookieHeaders.forEach { header ->
+        val cookie = runCatching { HttpCookie.parse(header).firstOrNull() }.getOrNull() ?: return@forEach
+        if (cookie.name !in MIMO_SESSION_COOKIE_NAMES) return@forEach
+        if (cookie.maxAge == 0L) cookies.remove(cookie.name) else cookies[cookie.name] = cookie.value
+    }
+    return cookies.entries.joinToString("; ") { (name, value) -> "$name=$value" }
+}
+
 // SiliconFlow walletd returns console money in 1e-12 CNY units.
 internal fun siliconFlowConsoleCashToYuan(raw: java.math.BigDecimal): java.math.BigDecimal =
     raw.divide(java.math.BigDecimal("1000000000000"))
+
+internal fun siliconFlowConsoleBalanceDetail(
+    balanceAmount: java.math.BigDecimal,
+    voucherBalance: java.math.BigDecimal,
+    includeVouchers: Boolean,
+): String = buildList {
+    add("余额 ¥${balanceAmount.stripTrailingZeros().toPlainString()}")
+    if (includeVouchers) add("代金券 ¥${voucherBalance.stripTrailingZeros().toPlainString()}")
+}.joinToString(" · ")
 
 internal data class MimoPayAsYouGoSnapshot(
     val cash: java.math.BigDecimal,
@@ -2075,7 +2232,7 @@ internal fun balanceDisplayValue(service: BalanceService): String {
     }.getOrDefault(service.balance)
     return when {
         service.currency.equals("USD", ignoreCase = true) -> "\$$amount"
-        service.currency.equals("CNY", ignoreCase = true) -> "¥$amount"
+        service.currency.equals("CNY", ignoreCase = true) || service.currency == "¥" -> "¥$amount"
         else -> "${service.currency} $amount"
     }
 }

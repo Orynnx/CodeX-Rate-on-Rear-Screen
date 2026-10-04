@@ -245,7 +245,7 @@ object QuotaRepository {
     fun setBackgroundEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit { putBoolean(BACKGROUND, enabled) }
         if (enabled && (signedIn(context) || StandardBalanceRepository.hasAuthenticatedService(context))) {
-            QuotaRefreshScheduler.schedule(context)
+            QuotaRefreshScheduler.schedule(context, resetFallback = true)
         } else if (!enabled) {
             QuotaRefreshScheduler.cancel(context)
         }
@@ -254,6 +254,9 @@ object QuotaRepository {
     fun setNotificationSyncEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit { putBoolean(NOTIFICATION_SYNC, enabled) }
         if (!enabled) QuotaForegroundService.stop(context)
+        if (backgroundEnabled(context) && (signedIn(context) || StandardBalanceRepository.hasAuthenticatedService(context))) {
+            QuotaRefreshScheduler.schedule(context, resetFallback = true)
+        }
     }
     fun saveTokens(context: Context, tokens: OAuthTokens) = saveTokens(context, tokens, expectedEpoch = null)
 
@@ -457,7 +460,8 @@ object CodexOAuth {
         Thread {
             runCatching {
                 ServerSocket().use { server ->
-                    server.bind(InetSocketAddress(InetAddress.getLoopbackAddress(), 1455))
+                    // 部分模拟器上的 Android WebView 会将 localhost 解析为 IPv4。
+                    server.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), 1455))
                     activeSocket = server
                     server.soTimeout = 120_000
                     onReady()

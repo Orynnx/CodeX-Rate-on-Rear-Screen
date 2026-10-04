@@ -1,7 +1,7 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
-val credexVersionName = "1.1.0"
+val credexVersionName = "1.1.6"
 
 plugins {
     alias(libs.plugins.android.application)
@@ -18,10 +18,20 @@ android {
         applicationId = "com.nickwoluff.credex"
         minSdk = 29
         targetSdk = 37
-        versionCode = 14
+        versionCode = 19
         versionName = credexVersionName
     }
     buildFeatures { compose = true; buildConfig = true }
+    buildTypes {
+        getByName("release") {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     lint {
         // v26 is required because AAPT accepts adaptive-icon only in a versioned resource;
